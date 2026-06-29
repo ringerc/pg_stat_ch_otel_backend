@@ -8,14 +8,11 @@ extern "C" {
 #include "postgres.h"
 #include "fmgr.h"
 
-// Extension version (set at compile time)
 #ifndef PG_STAT_CH_VERSION
 #define PG_STAT_CH_VERSION "unknown"
 #endif
 
-// SQL-callable functions
 PGDLLEXPORT Datum pg_stat_ch_version(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum pg_stat_ch_stats(PG_FUNCTION_ARGS);
 
 #ifdef __cplusplus
 }

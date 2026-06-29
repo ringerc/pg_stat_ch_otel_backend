@@ -1,5 +1,4 @@
-// pg_stat_ch GUC (Grand Unified Configuration) declarations
-
+// pg_stat_ch GUC declarations
 #ifndef PG_STAT_CH_GUC_H
 #define PG_STAT_CH_GUC_H
 
@@ -7,37 +6,21 @@
 extern "C" {
 #endif
 
+// Whether to collect telemetry at all.
 extern bool psch_enabled;
-extern bool psch_use_otel;
-extern char* psch_clickhouse_host;
-extern int psch_clickhouse_port;
-extern char* psch_clickhouse_user;
-extern char* psch_clickhouse_password;
-extern char* psch_clickhouse_database;
-extern bool psch_clickhouse_use_tls;
-extern bool psch_clickhouse_skip_tls_verify;
-extern char* psch_otel_endpoint;
-extern char* psch_hostname;
-extern int psch_queue_capacity;
-extern int psch_string_area_size;
-extern int psch_flush_interval_ms;
-extern int psch_batch_max;
-extern int psch_log_min_elevel;
-extern int psch_otel_log_queue_size;
-extern int psch_otel_log_batch_size;
-extern int psch_otel_log_max_bytes;
-extern int psch_otel_log_delay_ms;
-extern int psch_otel_metric_interval_ms;
-extern bool psch_debug_force_locked_overflow;
-extern int psch_min_duration_us;
-extern int psch_normalize_cache_max;
-extern double psch_sample_rate;
-extern bool psch_otel_arrow_passthrough;
-extern int psch_otel_max_block_bytes;
-extern char* psch_extra_attributes;
-extern char* psch_debug_arrow_dump_dir;
 
-// Initialize GUC variables
+// Only sample queries at or above this duration (microseconds). 0 = all.
+extern int psch_min_duration_us;
+
+// Fraction of queries below min_duration_us to sample. 1.0 = all, 0.0 = none.
+extern double psch_sample_rate;
+
+// Minimum ereport level to capture as error events.
+extern int psch_log_min_elevel;
+
+// Maximum number of normalized query texts to cache per backend.
+extern int psch_normalize_cache_max;
+
 void PschInitGuc(void);
 
 #ifdef __cplusplus

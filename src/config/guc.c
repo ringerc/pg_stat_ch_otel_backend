@@ -1,46 +1,19 @@
-// pg_stat_ch GUC (Grand Unified Configuration) implementation
+// pg_stat_ch GUC implementation
 
 #include "postgres.h"
 
-#include "utils/guc.h"
-
 #include <limits.h>
+
+#include "utils/guc.h"
 
 #include "config/guc.h"
 
-// GUC variable storage
 bool psch_enabled = true;
-bool psch_use_otel = false;
-char* psch_clickhouse_host = NULL;
-int psch_clickhouse_port = 9000;
-char* psch_clickhouse_user = NULL;
-char* psch_clickhouse_password = NULL;
-char* psch_clickhouse_database = NULL;
-bool psch_clickhouse_use_tls = false;
-bool psch_clickhouse_skip_tls_verify = false;
-char* psch_otel_endpoint = NULL;
-char* psch_hostname = NULL;
-int psch_queue_capacity = 131072;
-int psch_string_area_size = 64;  // MB, for DSA string storage
-int psch_flush_interval_ms = 500;
-int psch_batch_max = 200000;
-int psch_log_min_elevel = WARNING;
-int psch_otel_log_queue_size = 65536;
-int psch_otel_log_batch_size = 8192;
-int psch_otel_log_max_bytes = 3 * 1024 * 1024;  // 3 MiB: gRPC default max is 4 MiB
-int psch_otel_log_delay_ms = 100;
-int psch_otel_metric_interval_ms = 5000;
-bool psch_debug_force_locked_overflow = false;
-int psch_min_duration_us = 0;
-int psch_normalize_cache_max = 32768;
+int  psch_min_duration_us = 0;
 double psch_sample_rate = 1.0;
-bool psch_otel_arrow_passthrough = false;
-int psch_otel_max_block_bytes = 3 * 1024 * 1024;  // 3 MiB (max: 16 MiB)
-char* psch_extra_attributes = NULL;
-char* psch_debug_arrow_dump_dir = NULL;
+int  psch_log_min_elevel = WARNING;
+int  psch_normalize_cache_max = 32768;
 
-// Log level options (matches PostgreSQL's server_message_level_options pattern)
-// clang-format off
 static const struct config_enum_entry log_elevel_options[] = {
     {"debug5",  DEBUG5,  false},
     {"debug4",  DEBUG4,  false},
@@ -56,352 +29,61 @@ static const struct config_enum_entry log_elevel_options[] = {
     {"panic",   PANIC,   false},
     {NULL,      0,       false},
 };
-// clang-format on
 
-// Check hook to ensure queue_capacity is a power of 2.
-// Parameters follow PostgreSQL GUC check hook signature.
-static bool check_psch_queue_capacity(int* newval, void** extra pg_attribute_unused(),
-                                      GucSource source pg_attribute_unused()) {
-  // Check if value is positive and a power of 2
-  if (*newval <= 0) {
-    GUC_check_errdetail("pg_stat_ch.queue_capacity must be positive.");
-    return false;
-  }
-
-  // Check if power of 2: value & (value - 1) == 0
-  if ((*newval & (*newval - 1)) != 0) {
-    GUC_check_errdetail(
-        "pg_stat_ch.queue_capacity must be a power of 2 "
-        "(e.g., 1024, 2048, 4096, 8192, 16384, 32768, 65536).");
-    return false;
-  }
-
-  return true;
-}
-
-// When adding a GUC here, also update test/regression/expected/guc.out.
 void PschInitGuc(void) {
-  // clang-format off
   DefineCustomBoolVariable(
-      "pg_stat_ch.enabled",                                   // name
-      "Enable or disable pg_stat_ch query telemetry collection.",  // short_desc
-      NULL,                                                   // long_desc
-      &psch_enabled,                                          // valueAddr
-      true,                                                   // bootValue
-      PGC_SIGHUP,                                             // context
-      0,                                                      // flags
-      NULL, NULL, NULL);                                      // hooks
-
-  DefineCustomBoolVariable(
-      "pg_stat_ch.use_otel",
-      "Send metrics through OpenTelemetry instead of ClickHouse.",
-      "When enabled, stats will be sent to an OTel endpoint instead of ClickHouse.",
-      &psch_use_otel,
-      false,
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomStringVariable(
-      "pg_stat_ch.clickhouse_host",
-      "ClickHouse server hostname.",
+      "pg_stat_ch.enabled",
+      "Enable or disable pg_stat_ch query telemetry collection.",
       NULL,
-      &psch_clickhouse_host,
-      "localhost",
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.clickhouse_port",
-      "ClickHouse server native protocol port.",
-      NULL,
-      &psch_clickhouse_port,
-      9000,           // bootValue
-      1, 65535,       // min, max
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomStringVariable(
-      "pg_stat_ch.clickhouse_user",
-      "ClickHouse user name.",
-      NULL,
-      &psch_clickhouse_user,
-      "default",
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomStringVariable(
-      "pg_stat_ch.clickhouse_password",
-      "ClickHouse user password.",
-      NULL,
-      &psch_clickhouse_password,
-      "",
-      PGC_POSTMASTER,
-      GUC_SUPERUSER_ONLY,
-      NULL, NULL, NULL);
-
-  DefineCustomStringVariable(
-      "pg_stat_ch.clickhouse_database",
-      "ClickHouse database name for telemetry storage.",
-      NULL,
-      &psch_clickhouse_database,
-      "pg_stat_ch",
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomBoolVariable(
-      "pg_stat_ch.clickhouse_use_tls",
-      "Enable TLS for ClickHouse connections.",
-      NULL,
-      &psch_clickhouse_use_tls,
-      false,
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomBoolVariable(
-      "pg_stat_ch.clickhouse_skip_tls_verify",
-      "Skip TLS certificate verification (insecure, for testing only).",
-      NULL,
-      &psch_clickhouse_skip_tls_verify,
-      false,
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomStringVariable(
-      "pg_stat_ch.otel_endpoint",
-      "OpenTelemetry gRPC endpoint (host:port).",
-      NULL,
-      &psch_otel_endpoint,
-      "localhost:4317",
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomStringVariable(
-      "pg_stat_ch.hostname",
-      "Override the hostname of the current machine.",
-      NULL,
-      &psch_hostname,
-      "",
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.queue_capacity",
-      "Maximum number of events in the shared memory queue (must be a power of 2).",
-      NULL,
-      &psch_queue_capacity,
-      131072,             // bootValue
-      1024, 4194304,      // min, max
-      PGC_POSTMASTER,
-      0,
-      check_psch_queue_capacity, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.string_area_size",
-      "Size in MB of the DSA area for variable-length string storage.",
-      "Query text and error messages are stored in a DSA (Dynamic Shared Memory Area) "
-      "rather than inline in ring buffer slots. This controls the total DSA area size.",
-      &psch_string_area_size,
-      64,              // bootValue: 64 MB
-      8, 1024,         // min: 8 MB, max: 1024 MB
-      PGC_POSTMASTER,
-      GUC_UNIT_MB,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.flush_interval_ms",
-      "Interval in milliseconds between ClickHouse export batches.",
-      NULL,
-      &psch_flush_interval_ms,
-      500,            // bootValue
-      100, 60000,     // min, max
-      PGC_SIGHUP,
-      GUC_UNIT_MS,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.batch_max",
-      "Maximum number of events per ClickHouse insert batch.",
-      NULL,
-      &psch_batch_max,
-      200000,           // bootValue
-      1, 1000000,       // min, max
+      &psch_enabled,
+      true,
       PGC_SIGHUP,
       0,
       NULL, NULL, NULL);
 
-  DefineCustomIntVariable(
-      "pg_stat_ch.otel_log_queue_size",
-      "Compatibility setting for legacy OTel queue sizing.",
-      "Retained for compatibility. The direct OTLP log exporter uses pg_stat_ch's "
-      "shared-memory queue instead of allocating a second OTel queue.",
-      &psch_otel_log_queue_size,
-      65536,              // bootValue
-      512, 1048576,       // min, max
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.otel_log_batch_size",
-      "Maximum records per OTLP log export call.",
-      "Caps how many log records the direct OTLP exporter puts into a single "
-      "gRPC ExportLogs request.",
-      &psch_otel_log_batch_size,
-      8192,               // bootValue
-      1, 131072,          // min, max
-      PGC_POSTMASTER,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.otel_log_max_bytes",
-      "Soft byte budget for a single OTLP log export call.",
-      "The direct OTLP exporter chunks log records to stay under this per-request "
-      "budget. The gRPC default is 4 MiB; the default leaves a safety margin.",
-      &psch_otel_log_max_bytes,
-      3 * 1024 * 1024,        // bootValue: 3 MiB
-      65536, 64 * 1024 * 1024,  // min: 64 KiB, max: 64 MiB
-      PGC_POSTMASTER,
-      GUC_UNIT_BYTE,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.otel_log_delay_ms",
-      "Deadline in milliseconds for a single OTLP log export call.",
-      "The direct OTLP exporter uses this as the per-request gRPC timeout so "
-      "the bgworker cannot block indefinitely on a slow collector.",
-      &psch_otel_log_delay_ms,
-      100,                // bootValue
-      10, 60000,          // min, max
-      PGC_POSTMASTER,
-      GUC_UNIT_MS,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.otel_metric_interval_ms",
-      "Compatibility setting for legacy OTel metric export interval.",
-      "Retained for compatibility. The direct OTLP exporter currently sends logs only, "
-      "so this setting has no effect.",
-      &psch_otel_metric_interval_ms,
-      5000,               // bootValue
-      100, 300000,         // min, max (100ms to 5min)
-      PGC_POSTMASTER,
-      GUC_UNIT_MS,
-      NULL, NULL, NULL);
-
-  DefineCustomEnumVariable(
-      "pg_stat_ch.log_min_elevel",
-      "Minimum error level to capture via emit_log_hook.",
-      "Set to 'warning' (default) to capture warnings and errors, "
-      "'error' for errors only, or 'debug5' for all messages.",
-      &psch_log_min_elevel,
-      WARNING,
-      log_elevel_options,
-      PGC_SUSET,
-      0,
-      NULL, NULL, NULL);
   DefineCustomIntVariable(
       "pg_stat_ch.min_duration_us",
-      "Minimum query duration in microseconds to always capture.",
-      "Queries faster than this threshold are sampled at pg_stat_ch.sample_rate "
-      "instead of being captured unconditionally. Set to 0 to capture all queries.",
+      "Minimum query duration in microseconds to always capture. 0 captures all.",
+      NULL,
       &psch_min_duration_us,
-      0,              // bootValue
-      0, INT_MAX,     // min, max
-      PGC_SUSET,
       0,
-      NULL, NULL, NULL);
-
-  DefineCustomIntVariable(
-      "pg_stat_ch.normalize_cache_max",
-      "Maximum entries in the per-backend normalized query cache.",
-      "Controls the LRU cache that bridges parse-time normalization to "
-      "executor-time event export. Takes effect at first query after backend start.",
-      &psch_normalize_cache_max,
-      32768,          // bootValue
-      64, 65536,      // min, max
-      PGC_SUSET,
+      0, INT_MAX,
+      PGC_SIGHUP,
       0,
       NULL, NULL, NULL);
 
   DefineCustomRealVariable(
       "pg_stat_ch.sample_rate",
-      "Sampling rate for queries below min_duration_us.",
-      "Fraction of sub-threshold queries to capture (0.0 = none, 1.0 = all). "
-      "Queries at or above min_duration_us are always captured regardless.",
+      "Fraction of queries below min_duration_us to sample (0.0-1.0).",
+      NULL,
       &psch_sample_rate,
-      1.0,            // bootValue
-      0.0, 1.0,       // min, max
-      PGC_SUSET,
+      1.0,
+      0.0, 1.0,
+      PGC_SIGHUP,
       0,
       NULL, NULL, NULL);
 
-  DefineCustomBoolVariable(
-      "pg_stat_ch.otel_arrow_passthrough",
-      "Send Arrow IPC batches via OTel instead of per-record proto.",
-      "When enabled together with use_otel, the bgworker builds Arrow RecordBatches "
-      "from the event queue and sends them as opaque OTLP LogRecord bodies.",
-      &psch_otel_arrow_passthrough,
-      false,
-      PGC_SIGHUP,
+  DefineCustomEnumVariable(
+      "pg_stat_ch.log_min_elevel",
+      "Minimum ereport level to capture as an error event.",
+      NULL,
+      &psch_log_min_elevel,
+      WARNING,
+      log_elevel_options,
+      PGC_USERSET,
       0,
       NULL, NULL, NULL);
 
   DefineCustomIntVariable(
-      "pg_stat_ch.otel_max_block_bytes",
-      "Maximum Arrow batch size in bytes per OTLP request.",
-      "Controls the soft byte budget (estimated, pre-compression) for a single "
-      "Arrow IPC batch before it is flushed. ZSTD compression typically shrinks "
-      "the payload 20-30x, so this budget can safely exceed the gRPC wire limit.",
-      &psch_otel_max_block_bytes,
-      3 * 1024 * 1024,           // bootValue: 3 MiB
-      65536, 16 * 1024 * 1024,  // min: 64 KiB, max: 16 MiB
-      PGC_SIGHUP,
-      GUC_UNIT_BYTE,
-      NULL, NULL, NULL);
-
-  DefineCustomStringVariable(
-      "pg_stat_ch.extra_attributes",
-      "Key-value pairs appended to exported Arrow batches.",
-      "Semicolon-separated k:v pairs for resource columns: "
-      "'instance_ubid:abc;server_role:primary;read_replica_type:regional;region:us-east-1'.",
-      &psch_extra_attributes,
-      "",
-      PGC_SIGHUP,
+      "pg_stat_ch.normalize_cache_max",
+      "Maximum number of normalized query texts cached per backend.",
+      NULL,
+      &psch_normalize_cache_max,
+      32768,
+      1, INT_MAX,
+      PGC_POSTMASTER,
       0,
       NULL, NULL, NULL);
 
-  DefineCustomStringVariable(
-      "pg_stat_ch.debug_arrow_dump_dir",
-      "Directory for dumping raw Arrow IPC payloads before gRPC send.",
-      "When non-empty, each Arrow IPC payload is written to this directory before "
-      "being sent through OTLP. Intended for test validation and debugging only.",
-      &psch_debug_arrow_dump_dir,
-      "",
-      PGC_SIGHUP,
-      0,
-      NULL, NULL, NULL);
-
-  DefineCustomBoolVariable(
-      "pg_stat_ch.debug_force_locked_overflow",
-      "Force HandleOverflow in locked path (debug/test only).",
-      "When enabled, TryEnqueueLocked always calls HandleOverflow regardless of "
-      "queue state. Used to deterministically test the overflow-under-lock deadlock fix.",
-      &psch_debug_force_locked_overflow,
-      false,
-      PGC_SUSET,
-      0,
-      NULL, NULL, NULL);
-  // clang-format on
-
-  EmitWarningsOnPlaceholders("pg_stat_ch");
+  MarkGUCPrefixReserved("pg_stat_ch");
 }

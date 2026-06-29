@@ -30,14 +30,16 @@
 #include "jit/jit.h"
 #endif
 
+#include "storage/proc.h"
+
 #include "hooks/query_normalize_state.h"
 
 #include "config/guc.h"
+#include "export/psch_span.h"
 #include "hooks/hooks.h"
 #include "hooks/query_normalize.h"
 #include "hooks/string_utils.h"
 #include "queue/event.h"
-#include "queue/shmem.h"
 
 // Previous hook values for chaining
 static post_parse_analyze_hook_type prev_post_parse_analyze = NULL;
@@ -397,15 +399,16 @@ static void BuildEventFromQueryDesc(QueryDesc* query_desc, PschEvent* event, int
   event->cpu_sys_time_us = cpu_sys_us;
 
   // Instrumentation data (duration, buffer, WAL)
-  if (query_desc->totaltime != NULL) {
 #if PG_VERSION_NUM >= 190000
-    event->duration_us = (uint64)(INSTR_TIME_GET_MICROSEC(query_desc->totaltime->total));
+#define PSCH_QUERY_INSTR(qd) ((qd)->query_instr)
 #else
-    event->duration_us = (uint64)(query_desc->totaltime->total * 1000000.0);
+#define PSCH_QUERY_INSTR(qd) ((qd)->totaltime)
 #endif
-    CopyBufferUsage(event, &query_desc->totaltime->bufusage);
-    CopyIoTiming(event, &query_desc->totaltime->bufusage);
-    CopyWalUsage(event, &query_desc->totaltime->walusage);
+  if (PSCH_QUERY_INSTR(query_desc) != NULL) {
+    event->duration_us = (uint64)(INSTR_TIME_GET_MICROSEC(PSCH_QUERY_INSTR(query_desc)->total));
+    CopyBufferUsage(event, &PSCH_QUERY_INSTR(query_desc)->bufusage);
+    CopyIoTiming(event, &PSCH_QUERY_INSTR(query_desc)->bufusage);
+    CopyWalUsage(event, &PSCH_QUERY_INSTR(query_desc)->walusage);
   } else {
     event->duration_us = (uint64)(GetCurrentTimestamp() - query_start_ts);
   }
@@ -420,7 +423,7 @@ static void BuildEventFromQueryDesc(QueryDesc* query_desc, PschEvent* event, int
 // The JumbleState (with constant locations) is only available here, so we
 // must generate any normalized form now and stash the final exported text for
 // ExecutorEnd.
-static void PschPostParseAnalyze(ParseState* pstate, Query* query, JumbleState* jstate) {
+static void PschPostParseAnalyze(ParseState* pstate, Query* query, const JumbleState* jstate) {
   if (prev_post_parse_analyze != NULL) {
     prev_post_parse_analyze(pstate, query, jstate);
   }
@@ -492,12 +495,14 @@ static void PschExecutorStart(QueryDesc* query_desc, int eflags) {
   }
 
   if (psch_enabled && query_desc->plannedstmt->queryId != UINT64CONST(0)) {
-    if (query_desc->totaltime == NULL) {
+    if (PSCH_QUERY_INSTR(query_desc) == NULL) {
       MemoryContext oldcxt = MemoryContextSwitchTo(query_desc->estate->es_query_cxt);
-#if PG_VERSION_NUM < 140000
-      query_desc->totaltime = InstrAlloc(1, INSTRUMENT_ALL);
+#if PG_VERSION_NUM >= 190000
+      PSCH_QUERY_INSTR(query_desc) = InstrAlloc(INSTRUMENT_ALL);
+#elif PG_VERSION_NUM >= 140000
+      PSCH_QUERY_INSTR(query_desc) = InstrAlloc(1, INSTRUMENT_ALL, false);
 #else
-      query_desc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
+      PSCH_QUERY_INSTR(query_desc) = InstrAlloc(1, INSTRUMENT_ALL);
 #endif
       MemoryContextSwitchTo(oldcxt);
     }
@@ -583,18 +588,16 @@ static void PschExecutorEnd(QueryDesc* query_desc) {
     return;
   }
 
-  if (query_desc->totaltime != NULL) {
-    InstrEndLoop(query_desc->totaltime);
+#if PG_VERSION_NUM < 190000
+  if (PSCH_QUERY_INSTR(query_desc) != NULL) {
+    InstrEndLoop(PSCH_QUERY_INSTR(query_desc));
   }
+#endif
 
   // Compute duration early for sampling filter
   uint64 duration_us;
-  if (query_desc->totaltime != NULL) {
-#if PG_VERSION_NUM >= 190000
-    duration_us = (uint64)(INSTR_TIME_GET_MICROSEC(query_desc->totaltime->total));
-#else
-    duration_us = (uint64)(query_desc->totaltime->total * 1000000.0);
-#endif
+  if (PSCH_QUERY_INSTR(query_desc) != NULL) {
+    duration_us = (uint64)(INSTR_TIME_GET_MICROSEC(PSCH_QUERY_INSTR(query_desc)->total));
   } else {
     duration_us = (uint64)(GetCurrentTimestamp() - query_start_ts);
   }
@@ -619,7 +622,7 @@ static void PschExecutorEnd(QueryDesc* query_desc) {
 
   PschEvent event;
   BuildEventFromQueryDesc(query_desc, &event, cpu_user_us, cpu_sys_us);
-  PschEnqueueEvent(&event);
+  PschEmitSpan(&event);
 
   if (prev_executor_end != NULL) {
     prev_executor_end(query_desc);
@@ -780,7 +783,7 @@ static void PschProcessUtility(PlannedStmt* pstmt, const char* queryString,
   BuildEventForUtility(&event, query_id, start_ts, duration_us, is_top_level,
                        GetUtilityRowCount(qc), &bufusage_delta, &walusage_delta, cpu_user_us,
                        cpu_sys_us);
-  PschEnqueueEvent(&event);
+  PschEmitSpan(&event);
 }
 
 #undef CALL_PROCESS_UTILITY
@@ -788,30 +791,18 @@ static void PschProcessUtility(PlannedStmt* pstmt, const char* queryString,
 // Check if log capture should occur for this error.
 // Returns false during early initialization, in background workers, or when disabled.
 static bool ShouldCaptureLog(ErrorData* edata) {
-  // Basic preconditions
-  if (edata == NULL || !system_init || !psch_enabled || disable_error_capture) {
+  if (edata == NULL || !system_init || !psch_enabled || disable_error_capture)
     return false;
-  }
 
-  // Check error level threshold
-  if (edata->elevel < psch_log_min_elevel) {
+  if (edata->elevel < psch_log_min_elevel)
     return false;
-  }
 
-  // PostgreSQL bootstrapping checks - MyProc indicates PGPROC allocation complete
-  if (MyProc == NULL || IsParallelWorker()) {
+  // PostgreSQL bootstrapping checks
+  if (MyProc == NULL || IsParallelWorker())
     return false;
-  }
 
-  // Session initialization checks (critical for debug5 safety):
-  // - MyDatabaseId: database must be assigned
-  // - IsUnderPostmaster: not single-user mode or bootstrap
-  // - psch_shared_state: shared memory must be ready
-  // - MyBgworkerEntry: skip background workers (not user queries)
-  if (MyDatabaseId == InvalidOid || !IsUnderPostmaster || psch_shared_state == NULL ||
-      MyBgworkerEntry != NULL) {
+  if (MyDatabaseId == InvalidOid || !IsUnderPostmaster || MyBgworkerEntry != NULL)
     return false;
-  }
 
   return true;
 }
@@ -841,7 +832,7 @@ static void CaptureLogEvent(ErrorData* edata) {
 
   CopyClientContext(&event);
 
-  PschEnqueueEvent(&event);
+  PschEmitSpan(&event);
 }
 
 // emit_log_hook - captures log messages at configured level and above
@@ -884,15 +875,6 @@ static void PschEmitLogHook(ErrorData* edata) {
   }
   PG_END_TRY();
   disable_error_capture = false;
-}
-
-// Set or clear the error-capture guard, returning the previous value so
-// callers nest correctly (e.g. PschEnqueueEvent suppressing capture while
-// already inside the emit_log_hook capture, which holds the guard).
-bool PschSuppressErrorCapture(bool suppress) {
-  bool prev = disable_error_capture;
-  disable_error_capture = suppress;
-  return prev;
 }
 
 void PschInstallHooks(void) {

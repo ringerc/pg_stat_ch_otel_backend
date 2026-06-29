@@ -50,7 +50,7 @@ static void InitNormalizedQueryBuffer(StringInfoData* norm_query, int query_len)
 // Populate the length field of LocationLen entries using the PostgreSQL lexer.
 // Core only provides locations; we need to lex the query to find token lengths.
 // Ported from pg_stat_statements fill_in_constant_lengths().
-static void FillInConstantLengths(JumbleState* jstate, const char* query, int query_loc) {
+static void FillInConstantLengths(const JumbleState* jstate, const char* query, int query_loc) {
   LocationLen* locs;
   core_yyscan_t yyscanner;
   core_yy_extra_type yyextra;
@@ -63,7 +63,9 @@ static void FillInConstantLengths(JumbleState* jstate, const char* query, int qu
   locs = jstate->clocations;
 
   yyscanner = scanner_init(query, &yyextra, &ScanKeywords, ScanKeywordTokens);
+#if PG_VERSION_NUM < 190000
   yyextra.escape_string_warning = false;
+#endif
 
   for (int i = 0; i < jstate->clocations_count; i++) {
     int loc;
@@ -108,7 +110,7 @@ static void FillInConstantLengths(JumbleState* jstate, const char* query, int qu
   scanner_finish(yyscanner);
 }
 
-char* PschNormalizeQuery(const char* query, int query_loc, int* query_len_p, JumbleState* jstate) {
+char* PschNormalizeQuery(const char* query, int query_loc, int* query_len_p, const JumbleState* jstate) {
   if (jstate == NULL || jstate->clocations_count <= 0) {
     return NULL;
   }

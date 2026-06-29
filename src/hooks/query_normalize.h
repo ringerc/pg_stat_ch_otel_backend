@@ -28,7 +28,7 @@ extern "C" {
 // query_loc: byte offset of the statement within query (for multi-statement)
 // query_len: in/out — input length, updated to normalized length on return
 // jstate:    JumbleState from post_parse_analyze_hook (contains constant locations)
-char* PschNormalizeQuery(const char* query, int query_loc, int* query_len, JumbleState* jstate);
+char* PschNormalizeQuery(const char* query, int query_loc, int* query_len, const JumbleState* jstate);
 
 #ifdef __cplusplus
 }
