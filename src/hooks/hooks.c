@@ -405,7 +405,7 @@ static void BuildEventFromQueryDesc(QueryDesc* query_desc, PschEvent* event, int
 #define PSCH_QUERY_INSTR(qd) ((qd)->totaltime)
 #endif
   if (PSCH_QUERY_INSTR(query_desc) != NULL) {
-    event->duration_us = (uint64)(INSTR_TIME_GET_MICROSEC(PSCH_QUERY_INSTR(query_desc)->total));
+    event->duration_us = (uint64)(PSCH_QUERY_INSTR(query_desc)->total * 1e6);
     CopyBufferUsage(event, &PSCH_QUERY_INSTR(query_desc)->bufusage);
     CopyIoTiming(event, &PSCH_QUERY_INSTR(query_desc)->bufusage);
     CopyWalUsage(event, &PSCH_QUERY_INSTR(query_desc)->walusage);
@@ -423,7 +423,11 @@ static void BuildEventFromQueryDesc(QueryDesc* query_desc, PschEvent* event, int
 // The JumbleState (with constant locations) is only available here, so we
 // must generate any normalized form now and stash the final exported text for
 // ExecutorEnd.
+#if PG_VERSION_NUM >= 190000
 static void PschPostParseAnalyze(ParseState* pstate, Query* query, const JumbleState* jstate) {
+#else
+static void PschPostParseAnalyze(ParseState* pstate, Query* query, JumbleState* jstate) {
+#endif
   if (prev_post_parse_analyze != NULL) {
     prev_post_parse_analyze(pstate, query, jstate);
   }
@@ -597,7 +601,7 @@ static void PschExecutorEnd(QueryDesc* query_desc) {
   // Compute duration early for sampling filter
   uint64 duration_us;
   if (PSCH_QUERY_INSTR(query_desc) != NULL) {
-    duration_us = (uint64)(INSTR_TIME_GET_MICROSEC(PSCH_QUERY_INSTR(query_desc)->total));
+    duration_us = (uint64)(PSCH_QUERY_INSTR(query_desc)->total * 1e6);
   } else {
     duration_us = (uint64)(GetCurrentTimestamp() - query_start_ts);
   }
