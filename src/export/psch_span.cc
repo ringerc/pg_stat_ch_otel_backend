@@ -297,13 +297,36 @@ PschEmitSpan(const PschEvent *event)
 			add_attr(api, &span, "db.postgresql.err.message", event->err_message);
 
 		// Also record as a span event so OTel-native consumers see it in the
-		// event stream rather than only as flat attributes.
-		span.inline_event_used        = true;
-		span.inline_event.core.time   = event->ts_start;
-		span.inline_event.core.elevel = event->err_elevel;
-		memcpy(span.inline_event.core.sqlstate, event->err_sqlstate, 6);
-		span.inline_event.message =
-			event->err_message[0] != '\0' ? event->err_message : NULL;
+		// event stream rather than only as flat attributes.  MINOR 3 of the
+		// otel_api replaced the single inline_event with the unified events[]
+		// list; append an "exception" event via span_add_event, using the same
+		// attribute keys the producer uses when it lowers an ereport so the
+		// event stream is consistent across span producers.  span_add_event
+		// copies the name and every attr string, so the transient stack buffer
+		// below is safe.
+		if (api->span_add_event != NULL)
+		{
+			OtelKeyValue ev_attrs[3];
+			int          ev_n = 0;
+			char         elevel_buf[16];
+
+			if (event->err_message[0] != '\0')
+			{
+				ev_attrs[ev_n].key   = "exception.message";
+				ev_attrs[ev_n].value = event->err_message;
+				ev_n++;
+			}
+			ev_attrs[ev_n].key   = "postgres.sqlstate";
+			ev_attrs[ev_n].value = event->err_sqlstate;
+			ev_n++;
+			snprintf(elevel_buf, sizeof(elevel_buf), "%d", event->err_elevel);
+			ev_attrs[ev_n].key   = "postgres.elevel";
+			ev_attrs[ev_n].value = elevel_buf;
+			ev_n++;
+
+			api->span_add_event(&span, "exception", event->ts_start,
+								 ev_attrs, ev_n);
+		}
 	}
 
 #undef NBUF
