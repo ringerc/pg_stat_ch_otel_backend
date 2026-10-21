@@ -27,7 +27,6 @@ void _PG_init(void) {
 
   PschInitGuc();
   PschInstallHooks();
-  PschInitSpanEmitter();
 }
 
 PG_FUNCTION_INFO_V1(pg_stat_ch_version);

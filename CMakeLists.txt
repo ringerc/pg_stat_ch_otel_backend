@@ -68,6 +68,14 @@ set(OTEL_API_INCLUDE_DIR
 target_include_directories(pg_stat_ch SYSTEM PRIVATE
   ${OTEL_API_INCLUDE_DIR}
 )
+# Real producer header when otel_api's headers are present; otherwise the
+# vendored no-op stub (include/otel_stub) so the extension still builds.
+if(EXISTS "${OTEL_API_INCLUDE_DIR}/otel_api/otel_producer.h")
+  target_compile_definitions(pg_stat_ch PRIVATE HAVE_OTEL_API)
+else()
+  message(STATUS "otel_api headers not found in ${OTEL_API_INCLUDE_DIR}: using no-op stub")
+  target_include_directories(pg_stat_ch SYSTEM PRIVATE include/otel_stub)
+endif()
 
 target_link_libraries(pg_stat_ch PRIVATE
   PostgreSQLServer::PostgreSQLServer

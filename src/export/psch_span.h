@@ -1,4 +1,4 @@
-// psch_span.h — OtelSpan emission API for pg_stat_ch
+// psch_span.h — otel_api span emission for pg_stat_ch
 //
 // pg_stat_ch registers as an otel_api producer: it collects rich per-statement
 // metrics via its own PostgreSQL hooks and emits OtelSpans that are dispatched
@@ -21,15 +21,10 @@ extern "C" {
 
 #include "queue/event.h"
 
-// Call once from _PG_init to register pg_stat_ch's InstrumentationScope with
-// otel_api. Uses the order-independent pending-registration mechanism so it
-// works whether otel_api loaded before or after pg_stat_ch.
-void PschInitSpanEmitter(void);
-
 // Emit a span for one collected event. Thread of execution: ExecutorEnd or
 // ProcessUtility (for statements) / emit_log_hook (for errors). Synchronous:
-// returns after all registered otel_api emit hooks have been called.
-// No-op when otel_api is absent or the event should be dropped.
+// the span is complete and exported (or dropped by otel_api's sampler) on
+// return. No-op when otel_api is absent or nothing consumes spans.
 void PschEmitSpan(const PschEvent *event);
 
 #ifdef __cplusplus
